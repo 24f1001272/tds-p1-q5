@@ -1,7 +1,9 @@
 python-telegram-bot>=20.0
 langchain
-langchain-openai
+langchain-google-genai
 pandas
 python-dotenv
 requests
 pydantic
+flask
+gunicorn

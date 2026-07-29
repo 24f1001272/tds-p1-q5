@@ -4,7 +4,7 @@ import requests
 import io
 import sys
 from pydantic import BaseModel, Field
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.tools import tool
 
 # 1. Define the STRICT output structure the grader demands
@@ -17,19 +17,15 @@ def log_action_to_jsonl(action_data):
     with open("run.jsonl", "a") as f:
         f.write(json.dumps(action_data) + "\n")
 
-def upload_log_file():
+def get_log_url():
     """
-    Uploads run.jsonl to a temporary public host and returns the URL.
-    We use 0x0.st as it persists longer than file.io and allows multiple wget downloads.
+    Returns the public URL where the run.jsonl file is hosted.
+    On Render, we will set the HOST_URL environment variable to your app's web address.
+    If testing locally, it returns localhost.
     """
-    try:
-        with open("run.jsonl", "rb") as f:
-            response = requests.post("https://0x0.st", files={"file": f})
-            if response.status_code == 200:
-                return response.text.strip()
-    except Exception as e:
-        print(f"Error uploading log: {e}")
-    return "https://fallback-url.com/run.jsonl"
+    host_url = os.environ.get("HOST_URL", "http://localhost:8080")
+    # Ensure it doesn't end with a slash before adding /run.jsonl
+    return f"{host_url.rstrip('/')}/run.jsonl"
 
 @tool
 def execute_python(code: str) -> str:
@@ -57,7 +53,7 @@ def run_data_agent(message_history):
     log_action_to_jsonl({"event": "received_task", "task": current_task})
     
     # Setup the LLM
-    llm = ChatOpenAI(model="gpt-4o", temperature=0)
+    llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite")
     llm_with_tools = llm.bind_tools([execute_python])
     
     log_action_to_jsonl({"event": "analyzing_data", "status": "in_progress"})
@@ -99,11 +95,12 @@ def run_data_agent(message_history):
     """
     
     result = structured_llm.invoke(system_prompt)
-    log_action_to_jsonl({"event": "generated_response", "result": result.model_dump()})
     
-    # 3. Upload the log to get the public URL and inject it into the final output
-    public_log_url = upload_log_file()
+    # 3. Inject the public URL into the final output BEFORE logging it
+    public_log_url = get_log_url()
     result.log_url = public_log_url
+    
+    log_action_to_jsonl({"event": "generated_response", "result": result.model_dump()})
     
     # 4. Return ONLY the raw JSON string as required by the assignment
     return result.model_dump_json()

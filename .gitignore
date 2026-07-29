@@ -1,3 +1,4 @@
 .env
 .venv
 run.jsonl
+__pycache__/
