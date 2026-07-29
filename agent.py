@@ -1,8 +1,11 @@
 import os
 import json
 import requests
+import io
+import sys
 from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
+from langchain_core.tools import tool
 
 # 1. Define the STRICT output structure the grader demands
 class BotResponse(BaseModel):
@@ -17,16 +20,34 @@ def log_action_to_jsonl(action_data):
 def upload_log_file():
     """
     Uploads run.jsonl to a temporary public host and returns the URL.
-    Note: For production, consider uploading to an AWS S3 bucket or GitHub Gist.
+    We use 0x0.st as it persists longer than file.io and allows multiple wget downloads.
     """
     try:
         with open("run.jsonl", "rb") as f:
-            response = requests.post("https://file.io", files={"file": f})
+            response = requests.post("https://0x0.st", files={"file": f})
             if response.status_code == 200:
-                return response.json().get("link")
-    except Exception:
-        pass
+                return response.text.strip()
+    except Exception as e:
+        print(f"Error uploading log: {e}")
     return "https://fallback-url.com/run.jsonl"
+
+@tool
+def execute_python(code: str) -> str:
+    """
+    Executes Python code and returns the stdout (printed) output. 
+    Use this to download data, load it into pandas, perform calculations, and print the answer.
+    """
+    old_stdout = sys.stdout
+    new_stdout = io.StringIO()
+    sys.stdout = new_stdout
+    try:
+        exec(code, globals())
+        output = new_stdout.getvalue()
+    except Exception as e:
+        output = f"Error: {str(e)}"
+    finally:
+        sys.stdout = old_stdout
+    return output
 
 def run_data_agent(message_history):
     # The last message is the current task
@@ -35,30 +56,54 @@ def run_data_agent(message_history):
     # Log that we received a task
     log_action_to_jsonl({"event": "received_task", "task": current_task})
     
-    # 2. Setup the LLM and bind the strict Pydantic structure
+    # Setup the LLM
     llm = ChatOpenAI(model="gpt-4o", temperature=0)
-    structured_llm = llm.with_structured_output(BotResponse)
-
-    # (In a real scenario, you would insert LangChain Pandas/CSV tools here 
-    # to actually download and analyze the MOSPI data before asking for the final answer)
+    llm_with_tools = llm.bind_tools([execute_python])
     
     log_action_to_jsonl({"event": "analyzing_data", "status": "in_progress"})
     
-    # 3. Prompt the LLM to format the final answer
-    system_prompt = f"""
-    You are a data analysis agent. Review the user's task.
-    You must extract or calculate the answer and return it EXACTLY in the shape requested.
+    # 1. Run the LLM to figure out the answer using Python code
+    messages = [
+        ("system", "You are a Python data analysis assistant. You have a tool to execute python code. "
+                   "When given a data analysis question, write python code to download the dataset (if provided), "
+                   "analyze it using pandas or other standard libraries, and print the answer. "
+                   "IMPORTANT: Make sure your Python code prints the final result so you can read it."),
+        ("human", current_task)
+    ]
     
-    Conversation history: {message_history}
+    try:
+        response = llm_with_tools.invoke(messages)
+        raw_answer = response.content
+        
+        # If the LLM decided to use our Python tool
+        if response.tool_calls:
+            for tool_call in response.tool_calls:
+                if tool_call["name"] == "execute_python":
+                    code_to_run = tool_call["args"].get("code", "")
+                    # Execute the python code
+                    tool_output = execute_python.invoke({"code": code_to_run})
+                    raw_answer += f"\nPython Execution Output:\n{tool_output}"
+    except Exception as e:
+        raw_answer = f"Agent failed to calculate: {str(e)}"
+        
+    # 2. Extract the final answer and enforce the STRICT JSON structure requested by the user
+    structured_llm = llm.with_structured_output(BotResponse)
+    
+    system_prompt = f"""
+    You are a JSON formatter. Extract the final answer from the agent's analysis result and return it EXACTLY in the JSON shape requested by the user's original task.
+    Do NOT wrap the output in markdown or backticks. Return raw JSON.
+    
+    Original Task from user: {current_task}
+    
+    Agent Analysis Result: {raw_answer}
     """
     
-    # 4. Generate the structured response
     result = structured_llm.invoke(system_prompt)
     log_action_to_jsonl({"event": "generated_response", "result": result.model_dump()})
     
-    # 5. Upload the log to get the public URL and inject it into the final output
+    # 3. Upload the log to get the public URL and inject it into the final output
     public_log_url = upload_log_file()
     result.log_url = public_log_url
     
-    # 6. Return ONLY the raw JSON string as required by the assignment
+    # 4. Return ONLY the raw JSON string as required by the assignment
     return result.model_dump_json()
