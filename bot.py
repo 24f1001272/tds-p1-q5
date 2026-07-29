@@ -27,7 +27,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         # Fallback in case of a crash to keep the bot alive
-        await update.message.reply_text(f'{{"error": "{str(e)}"}')
+        await update.message.reply_text(f'{{"error": "{str(e)}"}}')
 
 def main():
     # Initialize the bot
